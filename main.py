@@ -1,67 +1,62 @@
+# main.py
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
-from datetime import datetime
-from calendar_utils import get_free_slots_for_day, find_next_free_slot, service, CALENDAR_ID, tz
+from calendar_utils import (
+    get_free_slots_for_day,
+    find_next_free_slot,
+    book_slot,
+    delete_slot,
+)
 
 app = FastAPI()
 
-class CheckRequest(BaseModel):
-    date: str
-    time: str
 
-class BookRequest(BaseModel):
+class BookingRequest(BaseModel):
     name: str
     company: str
-    phone: str
     date: str
     time: str
+    phone: str
+
 
 class DeleteRequest(BaseModel):
     name: str
     date: str
     time: str
 
-@app.post("/check-availability")
-def check_availability(req: CheckRequest):
-    dt = tz.localize(datetime.strptime(f"{req.date} {req.time}", "%Y-%m-%d %H:%M"))
-    free = get_free_slots_for_day(CALENDAR_ID, req.date)
-    if dt.isoformat() in free:
-        return {"available": True}
-    raise HTTPException(status_code=409, detail="Slot not available")
+
+class FreeDayRequest(BaseModel):
+    date: str
+
 
 @app.post("/book")
-def book(req: BookRequest):
-    dt = tz.localize(datetime.strptime(f"{req.date} {req.time}", "%Y-%m-%d %H:%M"))
-    if not is_slot_free(CALENDAR_ID, dt):
-        raise HTTPException(status_code=409, detail="Slot already taken")
-    event = {
-        'summary': f"{req.name} ({req.company})",
-        'description': f"Telefon: {req.phone}",
-        'start': {'dateTime': dt.isoformat(), 'timeZone': tz.zone},
-        'end': {'dateTime': (dt + timedelta(minutes=60)).isoformat(), 'timeZone': tz.zone},
-    }
-    service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-    return {"booked": True}
+def api_book(req: BookingRequest):
+    return book_slot(req.name, req.company, req.date, req.time, req.phone)
+
 
 @app.post("/delete")
-def delete(req: DeleteRequest):
-    dt = tz.localize(datetime.strptime(f"{req.date} {req.time}", "%Y-%m-%d %H:%M"))
-    events = service.events().list(calendarId=CALENDAR_ID, timeMin=dt.isoformat(), timeMax=(dt + timedelta(hours=1)).isoformat()).execute().get("items", [])
-    for event in events:
-        if req.name.lower() in event.get("summary", "").lower():
-            service.events().delete(calendarId=CALENDAR_ID, eventId=event["id"]).execute()
-            return {"deleted": True}
-    raise HTTPException(status_code=404, detail="No matching event found")
+def api_delete(req: DeleteRequest):
+    return delete_slot(req.name, req.date, req.time)
+
 
 @app.post("/free-slots")
-def free_slots(req: CheckRequest):
-    slots = get_free_slots_for_day(CALENDAR_ID, req.date)
-    if not slots:
-        raise HTTPException(status_code=404, detail="No free slots")
-    return {"free_slots": slots}
+def api_free(req: FreeDayRequest):
+    from datetime import datetime
+    date_obj = datetime.strptime(req.date, "%Y-%m-%d").date()
+    free = get_free_slots_for_day(date_obj)
 
-@app.get("/next-free-slot")
-def next_free_slot():
-    next_slot = find_next_free_slot(CALENDAR_ID)
-    return {"next_free_slot": next_slot}
+    if not free:
+        return {"free_slots": []}, 204
+
+    return {"free_slots": free}, 200
+
+
+@app.get("/next-free")
+def api_next_free():
+    result = find_next_free_slot()
+    if not result:
+        return {"next_slot": None}, 204
+
+    date, time = result
+    return {"next_slot": f"{date} {time}"}, 200
