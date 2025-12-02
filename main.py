@@ -1,82 +1,46 @@
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-from calendar_utils import (
-    get_free_slots,
-    book_appointment,
-    delete_appointment,
-    get_next_available_slot,
-    check_availability
-)
+from fastapi import FastAPI, HTTPException
+from config import BookingRequest, DeletionRequest, AvailabilityRequest, BookedSlot
+from calendar_utils import book_appointment, delete_appointment, get_free_slots, get_next_available_slot, check_availability
 
 app = FastAPI()
 
-
-class SlotRequest(BaseModel):
-    date: str
-
-
-class BookingRequest(BaseModel):
-    name: str
-    company: str
-    date: str
-    time: str
-    phone: str
+@app.get("/")
+def root():
+    return {"message": "Neuratek Calendar Middleware is running."}
 
 
-class DeleteRequest(BaseModel):
-    name: str
-    date: str
-    time: str
-
-
-@app.post("/free-slots")
-def free_slots(request: SlotRequest):
-    try:
-        return get_free_slots(request.date)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/check-availability")
+def check_avail(data: BookingRequest):
+    if check_availability(data.date, data.time):
+        return {"available": True}
+    raise HTTPException(status_code=409, detail="Slot not available")
 
 
 @app.post("/book")
-def book(request: BookingRequest):
-    try:
-        result = book_appointment(request.name, request.company, request.date, request.time, request.phone)
-        if result:
-            return {"status": "success"}
-        else:
-            raise HTTPException(status_code=409, detail="Slot already booked or invalid.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def book(data: BookingRequest):
+    success = book_appointment(data.name, data.company, data.date, data.time, data.phone)
+    if success:
+        return {"success": True}
+    raise HTTPException(status_code=409, detail="Booking failed. Slot might already be taken.")
 
 
 @app.post("/delete")
-def delete(request: DeleteRequest):
-    try:
-        result = delete_appointment(request.name, request.date, request.time)
-        if result:
-            return {"status": "deleted"}
-        else:
-            raise HTTPException(status_code=404, detail="Appointment not found.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def delete(data: DeletionRequest):
+    success = delete_appointment(data.name, data.date, data.time)
+    if success:
+        return {"success": True}
+    raise HTTPException(status_code=404, detail="Appointment not found")
+
+
+@app.post("/free-slots")
+def free_slots(data: AvailabilityRequest):
+    slots = get_free_slots(data.date)
+    if slots:
+        return {"date": data.date, "free_slots": slots}
+    raise HTTPException(status_code=404, detail="No free slots available on this day")
 
 
 @app.get("/next-free")
 def next_free():
-    try:
-        slot = get_next_available_slot()
-        if slot:
-            return {"next_slot": slot}
-        else:
-            raise HTTPException(status_code=404, detail="No free slots available.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/check-availability")
-def check(request: BookingRequest):
-    try:
-        available = check_availability(request.date, request.time)
-        return {"available": available}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    slot = get_next_available_slot()
+    return slot or {"message": "No free slots in the next 30 days"}
