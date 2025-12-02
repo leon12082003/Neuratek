@@ -1,14 +1,20 @@
-# config.py
+from pydantic import BaseModel
 
-CALENDAR_ID = "neuratek-calendar-service@neuratek-479922.iam.gserviceaccount.com"
-TIMEZONE = "Europe/Berlin"
+class BookingRequest(BaseModel):
+    name: str
+    company: str
+    date: str
+    time: str
+    phone: str
 
-WORK_HOURS = {
-    "mon": ("08:00", "18:00"),
-    "tue": ("08:00", "18:00"),
-    "wed": ("08:00", "18:00"),
-    "thu": ("08:00", "18:00"),
-    "fri": ("08:00", "18:00"),
-    "sat": ("10:00", "14:00"),
-    "sun": ("10:00", "14:00")
-}
+class DeletionRequest(BaseModel):
+    name: str
+    date: str
+    time: str
+
+class AvailabilityRequest(BaseModel):
+    date: str
+
+class BookedSlot(BaseModel):
+    date: str
+    time: str
