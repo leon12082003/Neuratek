@@ -3,7 +3,6 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from config import WORK_HOURS, CALENDAR_ID, APPOINTMENT_DURATION_MINUTES
 import pytz
-import os
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 SERVICE_ACCOUNT_FILE = 'service_account.json'
@@ -21,29 +20,53 @@ def get_service():
         raise
 
 
+def _parse_event_times(event, tz):
+    """Hilfsfunktion: Start/Ende eines Events als datetime (mit TZ) zurückgeben."""
+    start = event.get("start", {})
+    end = event.get("end", {})
+
+    if "dateTime" in start:
+        start_dt = datetime.fromisoformat(start["dateTime"])
+    else:
+        # Ganztägiges Event: von 00:00 dieses Tages bis 00:00 nächster Tag
+        start_dt = tz.localize(datetime.strptime(start["date"], "%Y-%m-%d"))
+
+    if "dateTime" in end:
+        end_dt = datetime.fromisoformat(end["dateTime"])
+    else:
+        end_dt = tz.localize(datetime.strptime(end["date"], "%Y-%m-%d"))
+
+    return start_dt, end_dt
+
+
 def is_slot_free(calendar_id, dt):
+    """
+    Slot ist frei, wenn KEIN Event den Slot-Zeitraum überschneidet.
+    Egal ob das Event 30 Min, 1h oder 3h lang ist.
+    """
     try:
         service = get_service()
         tz = pytz.timezone("Europe/Berlin")
         if dt.tzinfo is None:
             dt = tz.localize(dt)
-        end_dt = dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+
+        slot_start = dt
+        slot_end = dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
         events = service.events().list(
             calendarId=calendar_id,
-            timeMin=dt.isoformat(),
-            timeMax=end_dt.isoformat(),
+            timeMin=slot_start.isoformat(),
+            timeMax=slot_end.isoformat(),
             singleEvents=True
         ).execute()
 
         for event in events.get("items", []):
-            event_start = event["start"].get("dateTime")
-            event_end = event["end"].get("dateTime")
-            if event_start and event_end:
-                start_dt = datetime.fromisoformat(event_start)
-                end_dt_expected = datetime.fromisoformat(event_end)
-                if start_dt == dt and end_dt_expected == dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES):
-                    return False
+            event_start, event_end = _parse_event_times(event, tz)
+
+            # Überlappung prüfen: event_start < slot_end UND event_end > slot_start
+            if event_start < slot_end and event_end > slot_start:
+                return False
+
         return True
     except Exception as e:
         print(f"[ERROR] is_slot_free failed: {e}")
@@ -98,27 +121,44 @@ def book_appointment(calendar_id, dt, name, company=None, phone=None):
 
 
 def delete_appointment(calendar_id, dt, name):
+    """
+    Löscht ein Event, wenn der angegebene Name (Person ODER Firma)
+    im Summary vorkommt und der Termin sich mit dem Slot überschneidet.
+    """
     try:
         service = get_service()
         tz = pytz.timezone("Europe/Berlin")
         if dt.tzinfo is None:
             dt = tz.localize(dt)
-        end_dt = dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+
+        slot_start = dt
+        slot_end = dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
         events = service.events().list(
             calendarId=calendar_id,
-            timeMin=dt.isoformat(),
-            timeMax=end_dt.isoformat(),
+            timeMin=slot_start.isoformat(),
+            timeMax=slot_end.isoformat(),
             singleEvents=True
         ).execute()
 
+        target = name.lower()
+
         for event in events.get("items", []):
-            if event.get("summary", "").lower() == name.lower():
+            summary = event.get("summary", "") or ""
+            event_start, event_end = _parse_event_times(event, tz)
+
+            # Erstmal prüfen, ob der Termin überhaupt den Slot überlappt
+            if not (event_start < slot_end and event_end > slot_start):
+                continue
+
+            # Dann prüfen, ob Name/Firmenname im Summary vorkommt
+            if target in summary.lower():
                 service.events().delete(
                     calendarId=calendar_id,
                     eventId=event["id"]
                 ).execute()
                 return True
+
         return False
     except Exception as e:
         print(f"[ERROR] delete_appointment failed: {e}")
@@ -170,7 +210,7 @@ def get_next_free_slots(calendar_id, count=3):
             date_str = date.strftime("%Y-%m-%d")
             after_time = None
             if i == 0:
-                # Runde auf nächste volle Stunde (bzw. nächste Slot-Grenze)
+                # Runde auf nächste Slot-Grenze (volle Stunde)
                 minute = 0
                 base = now.replace(minute=0, second=0, microsecond=0)
                 if now.minute > 0:
@@ -186,3 +226,4 @@ def get_next_free_slots(calendar_id, count=3):
     except Exception as e:
         print(f"[ERROR] get_next_free_slots failed: {e}")
         raise
+
