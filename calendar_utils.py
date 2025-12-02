@@ -1,123 +1,188 @@
-from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
+from config import WORK_HOURS, CALENDAR_ID, APPOINTMENT_DURATION_MINUTES
 import pytz
+import os
 
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 SERVICE_ACCOUNT_FILE = 'service_account.json'
-CALENDAR_ID = 'neuratek-calendar-service@neuratek-479922.iam.gserviceaccount.com'
-TIMEZONE = 'Europe/Berlin'
-OPENING_HOURS = {
-    "monday": ("08:00", "18:00"),
-    "tuesday": ("08:00", "18:00"),
-    "wednesday": ("08:00", "18:00"),
-    "thursday": ("08:00", "18:00"),
-    "friday": ("08:00", "18:00"),
-    "saturday": ("10:00", "14:00"),
-    "sunday": ("10:00", "14:00"),
-}
-SLOT_DURATION_MINUTES = 60
-NO_GAP_BETWEEN_SLOTS = True
-
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE,
-    scopes=['https://www.googleapis.com/auth/calendar']
-)
-service = build('calendar', 'v3', credentials=credentials)
 
 
-def get_day_opening_hours(date_obj):
-    weekday = date_obj.strftime('%A').lower()
-    return OPENING_HOURS.get(weekday, (None, None))
+def get_service():
+    try:
+        creds = Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE,
+            scopes=SCOPES
+        )
+        return build('calendar', 'v3', credentials=creds)
+    except Exception as e:
+        print(f"[ERROR] Failed to load Google service account: {e}")
+        raise
 
 
-def get_free_slots(date_str):
-    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-    start_str, end_str = get_day_opening_hours(date_obj)
-    if not start_str or not end_str:
-        return []
+def is_slot_free(calendar_id, dt):
+    try:
+        service = get_service()
+        tz = pytz.timezone("Europe/Berlin")
+        if dt.tzinfo is None:
+            dt = tz.localize(dt)
+        end_dt = dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
-    tz = pytz.timezone(TIMEZONE)
-    day_start = tz.localize(datetime.combine(date_obj, datetime.strptime(start_str, "%H:%M").time()))
-    day_end = tz.localize(datetime.combine(date_obj, datetime.strptime(end_str, "%H:%M").time()))
+        events = service.events().list(
+            calendarId=calendar_id,
+            timeMin=dt.isoformat(),
+            timeMax=end_dt.isoformat(),
+            singleEvents=True
+        ).execute()
 
-    events_result = service.events().list(
-        calendarId=CALENDAR_ID,
-        timeMin=day_start.isoformat(),
-        timeMax=day_end.isoformat(),
-        singleEvents=True,
-        orderBy='startTime'
-    ).execute()
-
-    events = events_result.get('items', [])
-    slots = []
-    current = day_start
-
-    while current + timedelta(minutes=SLOT_DURATION_MINUTES) <= day_end:
-        overlap = False
-        for event in events:
-            event_start = datetime.fromisoformat(event['start']['dateTime']).astimezone(tz)
-            event_end = datetime.fromisoformat(event['end']['dateTime']).astimezone(tz)
-            if not (current + timedelta(minutes=SLOT_DURATION_MINUTES) <= event_start or current >= event_end):
-                overlap = True
-                break
-        if not overlap:
-            slots.append(current.strftime("%H:%M"))
-        current += timedelta(minutes=SLOT_DURATION_MINUTES)
-
-    return slots
+        for event in events.get("items", []):
+            event_start = event["start"].get("dateTime")
+            event_end = event["end"].get("dateTime")
+            if event_start and event_end:
+                start_dt = datetime.fromisoformat(event_start)
+                end_dt_expected = datetime.fromisoformat(event_end)
+                if start_dt == dt and end_dt_expected == dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES):
+                    return False
+        return True
+    except Exception as e:
+        print(f"[ERROR] is_slot_free failed: {e}")
+        raise
 
 
-def book_appointment(name, company, date, time, phone):
-    tz = pytz.timezone(TIMEZONE)
-    start = tz.localize(datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"))
-    end = start + timedelta(minutes=SLOT_DURATION_MINUTES)
+def book_appointment(calendar_id, dt, name, company=None, phone=None):
+    try:
+        if not is_slot_free(calendar_id, dt):
+            return False
 
-    if not check_availability(date, time):
+        service = get_service()
+        tz = pytz.timezone("Europe/Berlin")
+        if dt.tzinfo is None:
+            dt = tz.localize(dt)
+
+        # Summary nach Vorgabe:
+        # "Telefontermin mit - {name} - von - {company} - unter ({phone})"
+        summary_parts = [f"Telefontermin mit - {name}"]
+        if company:
+            summary_parts.append(f"- von - {company}")
+        if phone:
+            summary_parts.append(f"- unter ({phone})")
+        summary = " ".join(summary_parts)
+
+        description_lines = [
+            f"Name: {name}",
+            f"Unternehmen: {company or '-'}",
+            f"Telefonnummer: {phone or '-'}",
+            "Quelle: ElevenLabs Telefonassistent Neuratek",
+        ]
+        description = "\n".join(description_lines)
+
+        event = {
+            'summary': summary,
+            'description': description,
+            'start': {
+                'dateTime': dt.isoformat(),
+                'timeZone': 'Europe/Berlin'
+            },
+            'end': {
+                'dateTime': (dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)).isoformat(),
+                'timeZone': 'Europe/Berlin'
+            },
+        }
+
+        service.events().insert(calendarId=calendar_id, body=event).execute()
+        return True
+    except Exception as e:
+        print(f"[ERROR] book_appointment failed: {e}")
+        raise
+
+
+def delete_appointment(calendar_id, dt, name):
+    try:
+        service = get_service()
+        tz = pytz.timezone("Europe/Berlin")
+        if dt.tzinfo is None:
+            dt = tz.localize(dt)
+        end_dt = dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+
+        events = service.events().list(
+            calendarId=calendar_id,
+            timeMin=dt.isoformat(),
+            timeMax=end_dt.isoformat(),
+            singleEvents=True
+        ).execute()
+
+        for event in events.get("items", []):
+            if event.get("summary", "").lower() == name.lower():
+                service.events().delete(
+                    calendarId=calendar_id,
+                    eventId=event["id"]
+                ).execute()
+                return True
         return False
-
-    event = {
-        'summary': f"{name} ({company})",
-        'description': f"Telefon: {phone}",
-        'start': {'dateTime': start.isoformat(), 'timeZone': TIMEZONE},
-        'end': {'dateTime': end.isoformat(), 'timeZone': TIMEZONE},
-    }
-
-    service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-    return True
+    except Exception as e:
+        print(f"[ERROR] delete_appointment failed: {e}")
+        raise
 
 
-def delete_appointment(name, date, time):
-    tz = pytz.timezone(TIMEZONE)
-    start = tz.localize(datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"))
-    end = start + timedelta(minutes=SLOT_DURATION_MINUTES)
+def get_free_slots_for_day(calendar_id, date_str, after_time=None):
+    try:
+        print(f"[DEBUG] Checking free slots for: {date_str}")
+        service = get_service()
+        date = datetime.fromisoformat(date_str)
+        weekday = date.strftime('%a').lower()
+        start_time, end_time = WORK_HOURS.get(weekday, (None, None))
+        if not start_time:
+            return []
 
-    events_result = service.events().list(
-        calendarId=CALENDAR_ID,
-        timeMin=start.isoformat(),
-        timeMax=end.isoformat(),
-        singleEvents=True
-    ).execute()
+        tz = pytz.timezone("Europe/Berlin")
+        start_dt = datetime.strptime(f"{date_str}T{start_time}", "%Y-%m-%dT%H:%M")
+        end_dt = datetime.strptime(f"{date_str}T{end_time}", "%Y-%m-%dT%H:%M")
+        if start_dt.tzinfo is None:
+            start_dt = tz.localize(start_dt)
+        if end_dt.tzinfo is None:
+            end_dt = tz.localize(end_dt)
 
-    for event in events_result.get('items', []):
-        if name.lower() in event.get('summary', '').lower():
-            service.events().delete(calendarId=CALENDAR_ID, eventId=event['id']).execute()
-            return True
-    return False
+        if after_time:
+            after_dt = datetime.strptime(f"{date_str}T{after_time}", "%Y-%m-%dT%H:%M")
+            if after_dt.tzinfo is None:
+                after_dt = tz.localize(after_dt)
+            if after_dt > start_dt:
+                start_dt = after_dt
 
-
-def get_next_available_slot():
-    tz = pytz.timezone(TIMEZONE)
-    now = datetime.now(tz)
-    for day_offset in range(30):  # bis 30 Tage in die Zukunft
-        date_obj = now.date() + timedelta(days=day_offset)
-        date_str = date_obj.strftime("%Y-%m-%d")
-        slots = get_free_slots(date_str)
-        for slot in slots:
-            slot_time = tz.localize(datetime.strptime(f"{date_str} {slot}", "%Y-%m-%d %H:%M"))
-            if slot_time > now:
-                return {"date": date_str, "time": slot}
-    return None
+        free_slots = []
+        while start_dt < end_dt:
+            if is_slot_free(calendar_id, start_dt):
+                free_slots.append(start_dt.strftime("%H:%M"))
+            start_dt += timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+        return free_slots
+    except Exception as e:
+        print(f"[ERROR] get_free_slots_for_day failed: {e}")
+        raise
 
 
-def check_availability(date, time):
-    return time in get_free_slots(date)
+def get_next_free_slots(calendar_id, count=3):
+    try:
+        now = datetime.now(pytz.timezone("Europe/Berlin"))
+        slots = []
+        for i in range(14):  # 2 Wochen
+            date = now + timedelta(days=i)
+            date_str = date.strftime("%Y-%m-%d")
+            after_time = None
+            if i == 0:
+                # Runde auf nächste volle Stunde (bzw. nächste Slot-Grenze)
+                minute = 0
+                base = now.replace(minute=0, second=0, microsecond=0)
+                if now.minute > 0:
+                    base += timedelta(hours=1)
+                after_time = base.strftime("%H:%M")
+
+            slots_today = get_free_slots_for_day(calendar_id, date_str, after_time)
+            for slot in slots_today:
+                slots.append(f"{date_str} {slot}")
+                if len(slots) == count:
+                    return slots
+        return slots
+    except Exception as e:
+        print(f"[ERROR] get_next_free_slots failed: {e}")
+        raise
