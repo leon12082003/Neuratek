@@ -41,14 +41,33 @@ def _parse_event_times(event, tz):
 
 def is_slot_free(calendar_id, dt):
     """
-    Slot ist frei, wenn KEIN Event den Slot-Zeitraum überschneidet.
-    Egal ob das Event 30 Min, 1h oder 3h lang ist.
+    Slot ist frei, wenn:
+    - Tag in WORK_HOURS ist (Mo–Fr)
+    - Zeit innerhalb der Öffnungszeiten liegt
+    - KEIN Event den Slot-Zeitraum überschneidet
     """
     try:
         service = get_service()
         tz = pytz.timezone("Europe/Berlin")
         if dt.tzinfo is None:
             dt = tz.localize(dt)
+
+        local_dt = dt.astimezone(tz)
+        weekday = local_dt.strftime('%a').lower()  # mon, tue, wed, ...
+
+        # 1) Tag muss in WORK_HOURS sein (damit Sa/So automatisch geblockt sind)
+        if weekday not in WORK_HOURS:
+            return False
+
+        start_str, end_str = WORK_HOURS[weekday]
+
+        day_str = local_dt.strftime("%Y-%m-%d")
+        day_start = tz.localize(datetime.strptime(f"{day_str}T{start_str}", "%Y-%m-%dT%H:%M"))
+        day_end = tz.localize(datetime.strptime(f"{day_str}T{end_str}", "%Y-%m-%dT%H:%M"))
+
+        # 2) Slot-Start muss innerhalb der Öffnungszeiten liegen
+        if not (day_start <= dt < day_end):
+            return False
 
         slot_start = dt
         slot_end = dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
@@ -147,11 +166,11 @@ def delete_appointment(calendar_id, dt, name):
             summary = event.get("summary", "") or ""
             event_start, event_end = _parse_event_times(event, tz)
 
-            # Erstmal prüfen, ob der Termin überhaupt den Slot überlappt
+            # Erst prüfen, ob Termin den Slot überlappt
             if not (event_start < slot_end and event_end > slot_start):
                 continue
 
-            # Dann prüfen, ob Name/Firmenname im Summary vorkommt
+            # Dann: Name/Firma muss im Summary vorkommen
             if target in summary.lower():
                 service.events().delete(
                     calendarId=calendar_id,
@@ -226,4 +245,3 @@ def get_next_free_slots(calendar_id, count=3):
     except Exception as e:
         print(f"[ERROR] get_next_free_slots failed: {e}")
         raise
-
