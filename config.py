@@ -26,8 +26,11 @@ OPENING_HOURS = {
 # Slot-Dauer in Minuten
 SLOT_DURATION_MINUTES = 60
 
-# Kein Versatz zwischen Terminen (Back-to-back erlaubt)
+# Kein Versatz zwischen Terminen
 SLOT_PADDING_MINUTES = 0
 
 # Pflichtangaben für Buchungen
 REQUIRED_FIELDS = ["name", "company", "date", "time", "phone"]
+
+# Zeitzone – gebraucht in calendar_utils
+TIMEZONE = "Europe/Berlin"
