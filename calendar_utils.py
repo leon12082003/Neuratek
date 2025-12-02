@@ -1,126 +1,123 @@
-# calendar_utils.py
-
-import datetime
-import pytz
-from google.oauth2.service_account import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from config import CALENDAR_ID, TIMEZONE, WORK_HOURS
+from datetime import datetime, timedelta
+import pytz
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+SERVICE_ACCOUNT_FILE = 'service_account.json'
+CALENDAR_ID = 'neuratek-calendar-service@neuratek-479922.iam.gserviceaccount.com'
+TIMEZONE = 'Europe/Berlin'
+OPENING_HOURS = {
+    "monday": ("08:00", "18:00"),
+    "tuesday": ("08:00", "18:00"),
+    "wednesday": ("08:00", "18:00"),
+    "thursday": ("08:00", "18:00"),
+    "friday": ("08:00", "18:00"),
+    "saturday": ("10:00", "14:00"),
+    "sunday": ("10:00", "14:00"),
+}
+SLOT_DURATION_MINUTES = 60
+NO_GAP_BETWEEN_SLOTS = True
 
-
-def get_service():
-    creds = Credentials.from_service_account_info(
-        SERVICE_ACCOUNT_INFO,
-        scopes=SCOPES,
-    )
-    return build("calendar", "v3", credentials=creds)
-
-
-def is_slot_free(service, start_dt, end_dt):
-    events = (
-        service.events()
-        .list(
-            calendarId=CALENDAR_ID,
-            timeMin=start_dt.isoformat(),
-            timeMax=end_dt.isoformat(),
-            singleEvents=True,
-            orderBy="startTime",
-        )
-        .execute()
-    )
-    return len(events.get("items", [])) == 0
+credentials = service_account.Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE,
+    scopes=['https://www.googleapis.com/auth/calendar']
+)
+service = build('calendar', 'v3', credentials=credentials)
 
 
-def get_free_slots_for_day(date):
-    tz = pytz.timezone(TIMEZONE)
-    weekday = date.strftime("%a").lower()
+def get_day_opening_hours(date_obj):
+    weekday = date_obj.strftime('%A').lower()
+    return OPENING_HOURS.get(weekday, (None, None))
 
-    if weekday not in WORK_HOURS:
+
+def get_free_slots(date_str):
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+    start_str, end_str = get_day_opening_hours(date_obj)
+    if not start_str or not end_str:
         return []
 
-    start_str, end_str = WORK_HOURS[weekday]
-
-    start_dt = tz.localize(datetime.datetime.combine(date, datetime.datetime.strptime(start_str, "%H:%M").time()))
-    end_dt = tz.localize(datetime.datetime.combine(date, datetime.datetime.strptime(end_str, "%H:%M").time()))
-
-    service = get_service()
-    free_slots = []
-
-    current = start_dt
-    while current + datetime.timedelta(hours=1) <= end_dt:
-        next_hour = current + datetime.timedelta(hours=1)
-        if is_slot_free(service, current, next_hour):
-            free_slots.append(current.strftime("%H:%M"))
-        current = next_hour
-
-    return free_slots
-
-
-def find_next_free_slot():
     tz = pytz.timezone(TIMEZONE)
-    today = datetime.datetime.now(tz).date()
+    day_start = tz.localize(datetime.combine(date_obj, datetime.strptime(start_str, "%H:%M").time()))
+    day_end = tz.localize(datetime.combine(date_obj, datetime.strptime(end_str, "%H:%M").time()))
 
-    for i in range(14):
-        date = today + datetime.timedelta(days=i)
-        free_today = get_free_slots_for_day(date)
-        if free_today:
-            return (date.strftime("%Y-%m-%d"), free_today[0])
+    events_result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=day_start.isoformat(),
+        timeMax=day_end.isoformat(),
+        singleEvents=True,
+        orderBy='startTime'
+    ).execute()
 
-    return None
+    events = events_result.get('items', [])
+    slots = []
+    current = day_start
+
+    while current + timedelta(minutes=SLOT_DURATION_MINUTES) <= day_end:
+        overlap = False
+        for event in events:
+            event_start = datetime.fromisoformat(event['start']['dateTime']).astimezone(tz)
+            event_end = datetime.fromisoformat(event['end']['dateTime']).astimezone(tz)
+            if not (current + timedelta(minutes=SLOT_DURATION_MINUTES) <= event_start or current >= event_end):
+                overlap = True
+                break
+        if not overlap:
+            slots.append(current.strftime("%H:%M"))
+        current += timedelta(minutes=SLOT_DURATION_MINUTES)
+
+    return slots
 
 
-def book_slot(name, company, date, time, phone):
+def book_appointment(name, company, date, time, phone):
     tz = pytz.timezone(TIMEZONE)
-    start_dt = tz.localize(datetime.datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"))
-    end_dt = start_dt + datetime.timedelta(hours=1)
+    start = tz.localize(datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"))
+    end = start + timedelta(minutes=SLOT_DURATION_MINUTES)
 
-    service = get_service()
-
-    if not is_slot_free(service, start_dt, end_dt):
-        return {"error": "Slot besetzt"}, 409
+    if not check_availability(date, time):
+        return False
 
     event = {
-        "summary": f"Termin: {name} ({company})",
-        "description": f"Name: {name}\nUnternehmen: {company}\nTelefon: {phone}",
-        "start": {"dateTime": start_dt.isoformat(), "timeZone": TIMEZONE},
-        "end": {"dateTime": end_dt.isoformat(), "timeZone": TIMEZONE},
+        'summary': f"{name} ({company})",
+        'description': f"Telefon: {phone}",
+        'start': {'dateTime': start.isoformat(), 'timeZone': TIMEZONE},
+        'end': {'dateTime': end.isoformat(), 'timeZone': TIMEZONE},
     }
 
     service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
-    return {"status": "success"}, 200
+    return True
 
 
-def delete_slot(name, date, time):
+def delete_appointment(name, date, time):
     tz = pytz.timezone(TIMEZONE)
+    start = tz.localize(datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"))
+    end = start + timedelta(minutes=SLOT_DURATION_MINUTES)
 
-    service = get_service()
-    start_dt = tz.localize(datetime.datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M"))
+    events_result = service.events().list(
+        calendarId=CALENDAR_ID,
+        timeMin=start.isoformat(),
+        timeMax=end.isoformat(),
+        singleEvents=True
+    ).execute()
 
-    events = (
-        service.events()
-        .list(
-            calendarId=CALENDAR_ID,
-            timeMin=start_dt.isoformat(),
-            timeMax=(start_dt + datetime.timedelta(hours=1)).isoformat(),
-            singleEvents=True,
-        )
-        .execute()
-    )
+    for event in events_result.get('items', []):
+        if name.lower() in event.get('summary', '').lower():
+            service.events().delete(calendarId=CALENDAR_ID, eventId=event['id']).execute()
+            return True
+    return False
 
-    items = events.get("items", [])
 
-    if not items:
-        return {"error": "Nicht gefunden"}, 404
+def get_next_available_slot():
+    tz = pytz.timezone(TIMEZONE)
+    now = datetime.now(tz)
+    for day_offset in range(30):  # bis 30 Tage in die Zukunft
+        date_obj = now.date() + timedelta(days=day_offset)
+        date_str = date_obj.strftime("%Y-%m-%d")
+        slots = get_free_slots(date_str)
+        for slot in slots:
+            slot_time = tz.localize(datetime.strptime(f"{date_str} {slot}", "%Y-%m-%d %H:%M"))
+            if slot_time > now:
+                return {"date": date_str, "time": slot}
+    return None
 
-    target = None
-    for e in items:
-        if name.lower() in e.get("summary", "").lower():
-            target = e
-            break
 
-    if not target:
-        return {"error": "Name nicht gefunden"}, 404
-
-    service.events().delete(calendarId=CALENDAR_ID, eventId=target["id"]).execute()
-    return {"status": "deleted"}, 200
+def check_availability(date, time):
+    return time in get_free_slots(date)
