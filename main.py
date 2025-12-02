@@ -1,15 +1,18 @@
-# main.py
-
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from calendar_utils import (
-    get_free_slots_for_day,
-    find_next_free_slot,
-    book_slot,
-    delete_slot,
+    get_free_slots,
+    book_appointment,
+    delete_appointment,
+    get_next_available_slot,
+    check_availability
 )
 
 app = FastAPI()
+
+
+class SlotRequest(BaseModel):
+    date: str
 
 
 class BookingRequest(BaseModel):
@@ -26,37 +29,54 @@ class DeleteRequest(BaseModel):
     time: str
 
 
-class FreeDayRequest(BaseModel):
-    date: str
+@app.post("/free-slots")
+def free_slots(request: SlotRequest):
+    try:
+        return get_free_slots(request.date)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/book")
-def api_book(req: BookingRequest):
-    return book_slot(req.name, req.company, req.date, req.time, req.phone)
+def book(request: BookingRequest):
+    try:
+        result = book_appointment(request.name, request.company, request.date, request.time, request.phone)
+        if result:
+            return {"status": "success"}
+        else:
+            raise HTTPException(status_code=409, detail="Slot already booked or invalid.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/delete")
-def api_delete(req: DeleteRequest):
-    return delete_slot(req.name, req.date, req.time)
-
-
-@app.post("/free-slots")
-def api_free(req: FreeDayRequest):
-    from datetime import datetime
-    date_obj = datetime.strptime(req.date, "%Y-%m-%d").date()
-    free = get_free_slots_for_day(date_obj)
-
-    if not free:
-        return {"free_slots": []}, 204
-
-    return {"free_slots": free}, 200
+def delete(request: DeleteRequest):
+    try:
+        result = delete_appointment(request.name, request.date, request.time)
+        if result:
+            return {"status": "deleted"}
+        else:
+            raise HTTPException(status_code=404, detail="Appointment not found.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/next-free")
-def api_next_free():
-    result = find_next_free_slot()
-    if not result:
-        return {"next_slot": None}, 204
+def next_free():
+    try:
+        slot = get_next_available_slot()
+        if slot:
+            return {"next_slot": slot}
+        else:
+            raise HTTPException(status_code=404, detail="No free slots available.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    date, time = result
-    return {"next_slot": f"{date} {time}"}, 200
+
+@app.post("/check-availability")
+def check(request: BookingRequest):
+    try:
+        available = check_availability(request.date, request.time)
+        return {"available": available}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
