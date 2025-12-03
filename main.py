@@ -1,21 +1,25 @@
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
+from datetime import datetime
 from calendar_utils import (
     is_slot_free, book_appointment, delete_appointment,
     get_free_slots_for_day, get_next_free_slots
 )
 from config import CALENDAR_ID
-from datetime import datetime
+from twilio.rest import Client
+import os
 
 app = FastAPI()
 
+
+# ---------- Models ----------
 
 class BookingRequest(BaseModel):
     date: str  # YYYY-MM-DD
     time: str  # HH:MM
     name: str
-    company: str
-    phone: str
+    company: str | None = None
+    phone: str | None = None
 
 
 class AvailabilityRequest(BaseModel):
@@ -30,8 +34,15 @@ class DeleteRequest(BaseModel):
 
 
 class FreeSlotsRequest(BaseModel):
-    date: str
+    date: str  # YYYY-MM-DD
 
+
+class SmsRequest(BaseModel):
+    to: str      # Ziel-Nummer im Format +49...
+    text: str    # SMS-Text
+
+
+# ---------- Google Calendar Endpoints ----------
 
 @app.post("/check-availability")
 def check_availability(req: AvailabilityRequest):
@@ -51,9 +62,9 @@ def book(req: BookingRequest):
     success = book_appointment(
         CALENDAR_ID,
         dt,
-        req.name,
-        req.company,
-        req.phone,
+        name=req.name,
+        company=req.company,
+        phone=req.phone
     )
     if not success:
         raise HTTPException(
@@ -90,3 +101,43 @@ def free_slots(req: FreeSlotsRequest):
 def next_free():
     slots = get_next_free_slots(CALENDAR_ID)
     return {"next_slots": slots}
+
+
+# ---------- Twilio Helper ----------
+
+def get_twilio_client() -> Client:
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    if not account_sid or not auth_token:
+        raise RuntimeError("Twilio credentials missing in environment variables.")
+    return Client(account_sid, auth_token)
+
+
+# ---------- SMS Endpoint ----------
+
+@app.post("/send-sms")
+def send_sms(req: SmsRequest):
+    """
+    Sendet eine SMS über Twilio. Wird von ElevenLabs aufgerufen,
+    nachdem der Kunde einer SMS-Bestätigung zugestimmt hat.
+    """
+    try:
+        from_number = os.getenv("TWILIO_FROM_NUMBER")
+        if not from_number:
+            raise RuntimeError("TWILIO_FROM_NUMBER is not set.")
+
+        client = get_twilio_client()
+
+        message = client.messages.create(
+            body=req.text,
+            from_=from_number,
+            to=req.to
+        )
+
+        return {"status": "sent", "sid": message.sid}
+    except Exception as e:
+        print(f"[ERROR] send_sms failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send SMS"
+        )
